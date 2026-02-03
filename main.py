@@ -22,7 +22,7 @@ def main() -> None:
 
     # Process Library
     start_time = time.perf_counter()
-    compression_times = process_library(
+    compression_times, exceeded_timeout_flags = process_library(
         ORIGINAL_LIBRARY_DIR,
         PROCESSED_LIBRARY_DIR,
         target_size_mb=TARGET_SIZE_MB,
@@ -36,9 +36,12 @@ def main() -> None:
     # Report size reduction
     posterior_metadata = inspect_library(PROCESSED_LIBRARY_DIR, sample_size=TEST_MODE)
 
-    # Add compression times to posterior metadata
+    # Add compression times and timeout flags to posterior metadata
     posterior_metadata["compression_time_seconds"] = posterior_metadata.index.map(
         lambda x: compression_times.get(x, None)
+    )
+    posterior_metadata["exceeded_timeout"] = posterior_metadata.index.map(
+        lambda x: exceeded_timeout_flags.get(x, False)
     )
 
     posterior_metadata.to_csv("results.csv")

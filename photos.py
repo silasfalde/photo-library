@@ -91,10 +91,11 @@ def _process_photo(
     min_quality: int = 50,
     quality_step: int = 5,
     timeout_seconds: float = 2.0,
-) -> float:
-    """Compressed the photo to be under target_size_mb and copies it to the output path. Returns compression time in seconds.
-    If processing exceeds timeout_seconds, stops and returns the elapsed time."""
+) -> tuple[float, bool]:
+    """Compressed the photo to be under target_size_mb and copies it to the output path.
+    Returns a tuple of (compression_time_seconds, exceeded_timeout)."""
     start_time = time.perf_counter()
+    exceeded_timeout = False
     try:
         with Image.open(image_path) as img:
             # Convert HEIC/HEIF to RGB if necessary
@@ -126,6 +127,7 @@ def _process_photo(
                 # Check if we've exceeded the timeout
                 elapsed = time.perf_counter() - start_time
                 if elapsed > timeout_seconds:
+                    exceeded_timeout = True
                     break
 
                 if exif_data:
@@ -146,7 +148,7 @@ def _process_photo(
         except Exception:
             # If all else fails, skip this file
             pass
-    return time.perf_counter() - start_time
+    return (time.perf_counter() - start_time, exceeded_timeout)
 
 
 def inspect_library(
@@ -186,9 +188,9 @@ def _is_missing_gps(value: object) -> bool:
         return False
 
 
-def _copy_photo_task(args: tuple[str, object, str, str]) -> str:
+def _copy_photo_task(args: tuple[str, object, str, str]) -> tuple[str, float, bool]:
     """Copies a photo that's already under target size to the output directory.
-    Returns the destination path."""
+    Returns (destination_path, compression_time, exceeded_timeout)."""
     (
         image_path,
         gps_lat,
@@ -205,12 +207,12 @@ def _copy_photo_task(args: tuple[str, object, str, str]) -> str:
     except Exception:
         pass
 
-    return destination
+    return (destination, 0.0, False)
 
 
 def _process_photo_task(
     args: tuple[str, object, str, str, str, float, int, int, str, float],
-) -> tuple[str, float]:
+) -> tuple[str, float, bool]:
     (
         image_path,
         gps_lat,
@@ -228,7 +230,7 @@ def _process_photo_task(
     else:
         destination = os.path.join(compressed_dir, os.path.basename(image_path))
 
-    compression_time = _process_photo(
+    compression_time, exceeded_timeout = _process_photo(
         image_path,
         destination,
         target_size_mb=target_size_mb,
@@ -237,8 +239,8 @@ def _process_photo_task(
         timeout_seconds=processing_timeout_seconds,
     )
 
-    # If processing took longer than the timeout, copy the original image to problem-photos
-    if compression_time > processing_timeout_seconds:
+    # If processing exceeded timeout, copy the original image to problem-photos
+    if exceeded_timeout:
         problem_photo_destination = os.path.join(
             problem_photos_dir, os.path.basename(image_path)
         )
@@ -247,7 +249,7 @@ def _process_photo_task(
         except Exception:
             pass
 
-    return (destination, compression_time)
+    return (destination, compression_time, exceeded_timeout)
 
 
 def process_library(
@@ -258,9 +260,10 @@ def process_library(
     quality_step: int = 5,
     sample_size: int | None = None,
     processing_timeout_seconds: float = 1.0,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, bool]]:
     """Processes the photo library by separating already-compliant photos from those needing compression.
-    Returns a dictionary mapping image paths to their compression times in seconds."""
+    Returns a tuple of (compression_times_dict, exceeded_timeout_dict) mapping image paths to their respective values.
+    """
     os.makedirs(output_dir, exist_ok=True)
     compressed_dir = os.path.join(output_dir, "compressed")
     os.makedirs(compressed_dir, exist_ok=True)
@@ -279,6 +282,7 @@ def process_library(
     needs_compression = metadata[metadata["image_size_mb"] > target_size_mb]
 
     compression_times = {}
+    exceeded_timeout_flags = {}
 
     # Process photos that are already compliant (just copy them)
     if len(already_compliant) > 0:
@@ -293,8 +297,11 @@ def process_library(
         ]
 
         for task in tqdm(copy_tasks, desc="Copying compliant images", unit="img"):
-            destination_path = _copy_photo_task(task)
-            compression_times[destination_path] = 0.0
+            destination_path, compression_time, exceeded_timeout = _copy_photo_task(
+                task
+            )
+            compression_times[destination_path] = compression_time
+            exceeded_timeout_flags[destination_path] = exceeded_timeout
 
     # Process photos that need compression
     if len(needs_compression) > 0:
@@ -315,7 +322,10 @@ def process_library(
         ]
 
         for task in tqdm(compress_tasks, desc="Compressing images", unit="img"):
-            destination_path, compression_time = _process_photo_task(task)
+            destination_path, compression_time, exceeded_timeout = _process_photo_task(
+                task
+            )
             compression_times[destination_path] = compression_time
+            exceeded_timeout_flags[destination_path] = exceeded_timeout
 
-    return compression_times
+    return (compression_times, exceeded_timeout_flags)
