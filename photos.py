@@ -242,13 +242,17 @@ def _process_photo_task(
         timeout_seconds=processing_timeout_seconds,
     )
 
-    # If processing exceeded timeout, copy the original image to problem-photos
+    # If processing exceeded timeout, swap the files:
+    # Move compressed version to problem-photos and copy original to destination
     if exceeded_timeout:
         problem_photo_destination = os.path.join(
             problem_photos_dir, os.path.basename(image_path)
         )
         try:
-            shutil.copy2(image_path, problem_photo_destination)
+            # Move the partially compressed version to problem-photos
+            shutil.move(destination, problem_photo_destination)
+            # Copy the original uncompressed image to the main directory
+            shutil.copy2(image_path, destination)
         except Exception:
             pass
 
