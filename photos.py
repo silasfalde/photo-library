@@ -3,8 +3,9 @@ import piexif
 import os
 import pandas as pd
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 import random
+import shutil
+import time
 
 # Register HEIC support if available
 try:
@@ -89,8 +90,9 @@ def _process_photo(
     target_size_mb: float = 2.0,
     min_quality: int = 50,
     quality_step: int = 5,
-) -> None:
-    """Compressed the photo to be under target_size_mb and copies it to the output path."""
+) -> float:
+    """Compressed the photo to be under target_size_mb and copies it to the output path. Returns compression time in seconds."""
+    start_time = time.perf_counter()
     try:
         with Image.open(image_path) as img:
             # Convert HEIC/HEIF to RGB if necessary
@@ -129,12 +131,12 @@ def _process_photo(
         except Exception:
             # If all else fails, skip this file
             pass
+    return time.perf_counter() - start_time
 
 
 def inspect_library(
     dir,
     parallel: bool = True,
-    max_workers: int | None = None,
     show_progress: bool = False,
     sample_size: int | None = None,
 ) -> pd.DataFrame:
@@ -147,24 +149,12 @@ def inspect_library(
 
     metadata_list = []
 
-    if parallel and len(image_paths) > 1:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            iterator = executor.map(_get_image_metadata_with_size, image_paths)
-            if show_progress:
-                iterator = tqdm(
-                    iterator, total=len(image_paths), desc="Inspecting images"
-                )
-            for metadata in iterator:
-                if metadata:
-                    metadata_list.append(metadata)
-    else:
-        iterator = image_paths
-        if show_progress:
-            iterator = tqdm(iterator, total=len(image_paths), desc="Inspecting images")
-        for image_path in iterator:
-            metadata = _get_image_metadata_with_size(image_path)
-            if metadata:
-                metadata_list.append(metadata)
+    iterator = image_paths
+    if show_progress:
+        iterator = tqdm(iterator, total=len(image_paths), desc="Inspecting images")
+    for image_path in iterator:
+        metadata = _get_image_metadata_with_size(image_path)
+        if metadata is not None:
 
     df = pd.DataFrame(metadata_list)
     if not df.empty:
@@ -181,11 +171,33 @@ def _is_missing_gps(value: object) -> bool:
         return False
 
 
-def _process_photo_task(args: tuple[str, object, str, str, float, int, int]) -> None:
+def _copy_photo_task(args: tuple[str, object, str, str]) -> None:
+    """Copies a photo that's already under target size to the output directory."""
     (
         image_path,
         gps_lat,
         output_dir,
+        missing_locations_dir,
+    ) = args
+    if _is_missing_gps(gps_lat):
+        destination = os.path.join(missing_locations_dir, os.path.basename(image_path))
+    else:
+        destination = os.path.join(output_dir, os.path.basename(image_path))
+
+    try:
+        shutil.copy2(image_path, destination)
+    except Exception:
+        pass
+
+
+def _process_photo_task(
+    args: tuple[str, object, str, str, str, float, int, int],
+) -> tuple[str, float]:
+    (
+        image_path,
+        gps_lat,
+        output_dir,
+        compressed_dir,
         missing_locations_dir,
         target_size_mb,
         min_quality,
@@ -194,15 +206,16 @@ def _process_photo_task(args: tuple[str, object, str, str, float, int, int]) -> 
     if _is_missing_gps(gps_lat):
         destination = os.path.join(missing_locations_dir, os.path.basename(image_path))
     else:
-        destination = os.path.join(output_dir, os.path.basename(image_path))
+        destination = os.path.join(compressed_dir, os.path.basename(image_path))
 
-    _process_photo(
+    compression_time = _process_photo(
         image_path,
         destination,
         target_size_mb=target_size_mb,
         min_quality=min_quality,
         quality_step=quality_step,
     )
+    return (image_path, compression_time)
 
 
 def process_library(
@@ -214,42 +227,67 @@ def process_library(
     min_quality: int = 50,
     quality_step: int = 5,
     sample_size: int | None = None,
-) -> None:
-    """Processes the photo library by compressing images and organizing them based on GPS data."""
+) -> dict[str, float]:
+    """Processes the photo library by separating already-compliant photos from those needing compression.
+    Returns a dictionary mapping image paths to their compression times in seconds."""
     os.makedirs(output_dir, exist_ok=True)
+    compressed_dir = os.path.join(output_dir, "compressed")
+    os.makedirs(compressed_dir, exist_ok=True)
+    missing_locations_dir = os.path.join(output_dir, "missing-locations")
+    target_size_mb: float = 2.0,
+    min_quality: int = 50,
+    quality_step: int = 5,
+    sample_size: int | None = None,
+) -> dict[str, float]:
+    """Processes the photo library by separating already-compliant photos from those needing compression.
+    Returns a dictionary mapping image paths to their compression times in seconds."""
+    os.makedirs(output_dir, exist_ok=True)
+    compressed_dir = os.path.join(output_dir, "compressed")
+    os.makedirs(compressed_dir, exist_ok=True)
     missing_locations_dir = os.path.join(output_dir, "missing-locations")
     os.makedirs(missing_locations_dir, exist_ok=True)
     metadata = inspect_library(
         input_dir,
-        parallel=parallel,
-        max_workers=max_workers,
         show_progress=False,
         sample_size=sample_size,
     )
 
-    tasks = [
-        (
-            image_path,
-            metadata.loc[image_path, "GPS_GPSLatitude"],
-            output_dir,
-            missing_locations_dir,
-            target_size_mb,
-            min_quality,
-            quality_step,
-        )
-        for image_path in metadata.index
-    ]
+    # Separate photos into two groups: those already under target size and those needing compression
+    already_compliant = metadata[metadata["image_size_mb"] <= target_size_mb]
+    needs_compression = metadata[metadata["image_size_mb"] > target_size_mb]
 
-    # Iterate through the dataframe and process files based on GPS data
-    if parallel and len(tasks) > 1:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            list(
-                tqdm(
-                    executor.map(_process_photo_task, tasks),
-                    total=len(tasks),
-                    desc="Processing images",
-                )
+    compression_times = {}
+
+    # Process photos that are already compliant (just copy them)
+    if len(already_compliant) > 0:
+        copy_tasks = [
+            (
+                image_path,
+                already_compliant.loc[image_path, "GPS_GPSLatitude"],
+                output_dir,
+                missing_locations_dir,
             )
-    else:
-        for task in tqdm(tasks, desc="Processing images"):
-            _process_photo_task(task)
+            for image_path in already_compliant.index
+        ]
+
+        for task in tqdm(copy_tasks, desc="Copying compliant images", unit="img"):
+            _copy_photo_task(task)
+
+    # Process photos that need compression
+    if len(needs_compression) > 0:
+        compress_tasks = [
+            (
+                image_path,
+                needs_compression.loc[image_path, "GPS_GPSLatitude"],
+                output_dir,
+                compressed_dir,
+                missing_locations_dir,
+                target_size_mb,
+                min_quality,
+                quality_step,
+            )
+            for image_path in needs_compression.index
+        ]
+
+        for task in tqdm(compress_tasks, desc="Compressing images", unit="img"):
+            image_path, compression_time = _process_photo_task(task)

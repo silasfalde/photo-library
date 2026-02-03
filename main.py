@@ -8,28 +8,22 @@ PROCESSED_LIBRARY_DIR = "processed-photos"
 TARGET_SIZE_MB = 3.0
 MIN_QUALITY = 50
 QUALITY_STEP = 5
-PARALLEL = True
-MAX_WORKERS = None
 
 # Test mode: set to a number to only process that many random photos (e.g., 50 for testing)
-TEST_MODE = None
+TEST_MODE = 100
 
 
 def main() -> None:
-    prior_metadata = inspect_library(
-        ORIGINAL_LIBRARY_DIR, parallel=PARALLEL, sample_size=TEST_MODE
-    )
+    prior_metadata = inspect_library(ORIGINAL_LIBRARY_DIR, sample_size=TEST_MODE)
 
     if os.path.exists(PROCESSED_LIBRARY_DIR):
         shutil.rmtree(PROCESSED_LIBRARY_DIR)
 
     # Process Library
     start_time = time.perf_counter()
-    process_library(
+    compression_times = process_library(
         ORIGINAL_LIBRARY_DIR,
         PROCESSED_LIBRARY_DIR,
-        parallel=PARALLEL,
-        max_workers=MAX_WORKERS,
         target_size_mb=TARGET_SIZE_MB,
         min_quality=MIN_QUALITY,
         quality_step=QUALITY_STEP,
@@ -38,9 +32,14 @@ def main() -> None:
     elapsed_seconds = time.perf_counter() - start_time
 
     # Report size reduction
-    posterior_metadata = inspect_library(
-        PROCESSED_LIBRARY_DIR, parallel=PARALLEL, sample_size=TEST_MODE
+    posterior_metadata = inspect_library(PROCESSED_LIBRARY_DIR, sample_size=TEST_MODE)
+
+    # Add compression times to posterior metadata
+    posterior_metadata["compression_time_seconds"] = posterior_metadata.index.map(
+        lambda x: compression_times.get(x, None)
     )
+
+    posterior_metadata.to_csv("results.csv")
     total_size_reduction = (
         prior_metadata["image_size_mb"].sum()
         - posterior_metadata["image_size_mb"].sum()
