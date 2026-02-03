@@ -90,8 +90,10 @@ def _process_photo(
     target_size_mb: float = 2.0,
     min_quality: int = 50,
     quality_step: int = 5,
+    timeout_seconds: float = 2.0,
 ) -> float:
-    """Compressed the photo to be under target_size_mb and copies it to the output path. Returns compression time in seconds."""
+    """Compressed the photo to be under target_size_mb and copies it to the output path. Returns compression time in seconds.
+    If processing exceeds timeout_seconds, stops and returns the elapsed time."""
     start_time = time.perf_counter()
     try:
         with Image.open(image_path) as img:
@@ -111,9 +113,22 @@ def _process_photo(
             target_size_bytes = int(target_size_mb * 1024 * 1024)
             exif_bytes = img.info.get("exif")
 
-            while True:
-                if exif_bytes:
+            # Process EXIF data once, outside the loop
+            exif_data = None
+            if exif_bytes:
+                try:
                     exif_data = piexif.dump(piexif.load(exif_bytes))
+                except Exception:
+                    # If EXIF processing fails, continue without it
+                    exif_data = None
+
+            while True:
+                # Check if we've exceeded the timeout
+                elapsed = time.perf_counter() - start_time
+                if elapsed > timeout_seconds:
+                    break
+
+                if exif_data:
                     img.save(output_path, quality=quality, exif=exif_data)
                 else:
                     img.save(output_path, quality=quality)
@@ -136,7 +151,6 @@ def _process_photo(
 
 def inspect_library(
     dir,
-    parallel: bool = True,
     show_progress: bool = False,
     sample_size: int | None = None,
 ) -> pd.DataFrame:
@@ -155,6 +169,7 @@ def inspect_library(
     for image_path in iterator:
         metadata = _get_image_metadata_with_size(image_path)
         if metadata is not None:
+            metadata_list.append(metadata)
 
     df = pd.DataFrame(metadata_list)
     if not df.empty:
@@ -171,8 +186,9 @@ def _is_missing_gps(value: object) -> bool:
         return False
 
 
-def _copy_photo_task(args: tuple[str, object, str, str]) -> None:
-    """Copies a photo that's already under target size to the output directory."""
+def _copy_photo_task(args: tuple[str, object, str, str]) -> str:
+    """Copies a photo that's already under target size to the output directory.
+    Returns the destination path."""
     (
         image_path,
         gps_lat,
@@ -189,9 +205,11 @@ def _copy_photo_task(args: tuple[str, object, str, str]) -> None:
     except Exception:
         pass
 
+    return destination
+
 
 def _process_photo_task(
-    args: tuple[str, object, str, str, str, float, int, int],
+    args: tuple[str, object, str, str, str, float, int, int, str, float],
 ) -> tuple[str, float]:
     (
         image_path,
@@ -202,6 +220,8 @@ def _process_photo_task(
         target_size_mb,
         min_quality,
         quality_step,
+        problem_photos_dir,
+        processing_timeout_seconds,
     ) = args
     if _is_missing_gps(gps_lat):
         destination = os.path.join(missing_locations_dir, os.path.basename(image_path))
@@ -214,30 +234,30 @@ def _process_photo_task(
         target_size_mb=target_size_mb,
         min_quality=min_quality,
         quality_step=quality_step,
+        timeout_seconds=processing_timeout_seconds,
     )
-    return (image_path, compression_time)
+
+    # If processing took longer than the timeout, copy the original image to problem-photos
+    if compression_time > processing_timeout_seconds:
+        problem_photo_destination = os.path.join(
+            problem_photos_dir, os.path.basename(image_path)
+        )
+        try:
+            shutil.copy2(image_path, problem_photo_destination)
+        except Exception:
+            pass
+
+    return (destination, compression_time)
 
 
 def process_library(
     input_dir: str,
     output_dir: str,
-    parallel: bool = True,
-    max_workers: int | None = None,
     target_size_mb: float = 2.0,
     min_quality: int = 50,
     quality_step: int = 5,
     sample_size: int | None = None,
-) -> dict[str, float]:
-    """Processes the photo library by separating already-compliant photos from those needing compression.
-    Returns a dictionary mapping image paths to their compression times in seconds."""
-    os.makedirs(output_dir, exist_ok=True)
-    compressed_dir = os.path.join(output_dir, "compressed")
-    os.makedirs(compressed_dir, exist_ok=True)
-    missing_locations_dir = os.path.join(output_dir, "missing-locations")
-    target_size_mb: float = 2.0,
-    min_quality: int = 50,
-    quality_step: int = 5,
-    sample_size: int | None = None,
+    processing_timeout_seconds: float = 1.0,
 ) -> dict[str, float]:
     """Processes the photo library by separating already-compliant photos from those needing compression.
     Returns a dictionary mapping image paths to their compression times in seconds."""
@@ -246,6 +266,8 @@ def process_library(
     os.makedirs(compressed_dir, exist_ok=True)
     missing_locations_dir = os.path.join(output_dir, "missing-locations")
     os.makedirs(missing_locations_dir, exist_ok=True)
+    problem_photos_dir = os.path.join(output_dir, "problem-photos")
+    os.makedirs(problem_photos_dir, exist_ok=True)
     metadata = inspect_library(
         input_dir,
         show_progress=False,
@@ -271,7 +293,8 @@ def process_library(
         ]
 
         for task in tqdm(copy_tasks, desc="Copying compliant images", unit="img"):
-            _copy_photo_task(task)
+            destination_path = _copy_photo_task(task)
+            compression_times[destination_path] = 0.0
 
     # Process photos that need compression
     if len(needs_compression) > 0:
@@ -285,9 +308,14 @@ def process_library(
                 target_size_mb,
                 min_quality,
                 quality_step,
+                problem_photos_dir,
+                processing_timeout_seconds,
             )
             for image_path in needs_compression.index
         ]
 
         for task in tqdm(compress_tasks, desc="Compressing images", unit="img"):
-            image_path, compression_time = _process_photo_task(task)
+            destination_path, compression_time = _process_photo_task(task)
+            compression_times[destination_path] = compression_time
+
+    return compression_times

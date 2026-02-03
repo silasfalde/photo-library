@@ -8,9 +8,10 @@ PROCESSED_LIBRARY_DIR = "processed-photos"
 TARGET_SIZE_MB = 3.0
 MIN_QUALITY = 50
 QUALITY_STEP = 5
+PROCESSING_TIMEOUT_SECONDS = 3.0
 
 # Test mode: set to a number to only process that many random photos (e.g., 50 for testing)
-TEST_MODE = 100
+TEST_MODE = 200
 
 
 def main() -> None:
@@ -28,6 +29,7 @@ def main() -> None:
         min_quality=MIN_QUALITY,
         quality_step=QUALITY_STEP,
         sample_size=TEST_MODE,
+        processing_timeout_seconds=PROCESSING_TIMEOUT_SECONDS,
     )
     elapsed_seconds = time.perf_counter() - start_time
 
