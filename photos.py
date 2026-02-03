@@ -124,21 +124,25 @@ def _process_photo(
                     exif_data = None
 
             while True:
-                # Check if we've exceeded the timeout
-                elapsed = time.perf_counter() - start_time
-                if elapsed > timeout_seconds:
-                    exceeded_timeout = True
-                    break
-
+                # Save at current quality
                 if exif_data:
                     img.save(output_path, quality=quality, exif=exif_data)
                 else:
                     img.save(output_path, quality=quality)
+
+                # Check if we're done
                 if (
                     os.path.getsize(output_path) <= target_size_bytes
                     or quality <= min_quality
                 ):
                     break
+
+                # Check if we've exceeded the timeout before continuing
+                elapsed = time.perf_counter() - start_time
+                if elapsed > timeout_seconds:
+                    exceeded_timeout = True
+                    break
+
                 quality -= quality_step
     except Exception:
         # If processing fails, try a simple copy with format conversion
@@ -211,13 +215,12 @@ def _copy_photo_task(args: tuple[str, object, str, str]) -> tuple[str, float, bo
 
 
 def _process_photo_task(
-    args: tuple[str, object, str, str, str, float, int, int, str, float],
+    args: tuple[str, object, str, str, float, int, int, str, float],
 ) -> tuple[str, float, bool]:
     (
         image_path,
         gps_lat,
         output_dir,
-        compressed_dir,
         missing_locations_dir,
         target_size_mb,
         min_quality,
@@ -228,7 +231,7 @@ def _process_photo_task(
     if _is_missing_gps(gps_lat):
         destination = os.path.join(missing_locations_dir, os.path.basename(image_path))
     else:
-        destination = os.path.join(compressed_dir, os.path.basename(image_path))
+        destination = os.path.join(output_dir, os.path.basename(image_path))
 
     compression_time, exceeded_timeout = _process_photo(
         image_path,
@@ -265,8 +268,6 @@ def process_library(
     Returns a tuple of (compression_times_dict, exceeded_timeout_dict) mapping image paths to their respective values.
     """
     os.makedirs(output_dir, exist_ok=True)
-    compressed_dir = os.path.join(output_dir, "compressed")
-    os.makedirs(compressed_dir, exist_ok=True)
     missing_locations_dir = os.path.join(output_dir, "missing-locations")
     os.makedirs(missing_locations_dir, exist_ok=True)
     problem_photos_dir = os.path.join(output_dir, "problem-photos")
@@ -310,7 +311,6 @@ def process_library(
                 image_path,
                 needs_compression.loc[image_path, "GPS_GPSLatitude"],
                 output_dir,
-                compressed_dir,
                 missing_locations_dir,
                 target_size_mb,
                 min_quality,
