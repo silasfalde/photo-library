@@ -71,16 +71,10 @@ The script generates `results.csv` containing metadata for all processed images,
 Some photos, particularly iPhone HEIC files with computational photography features or complex EXIF data, may take longer to process than others. The processor:
 
 1. Compresses the image with quality decreasing in steps
-2. If timeout is exceeded, saves the partially compressed version to problem-photos/
-3. Copies the original uncompressed image to the main processed-photos/ directory
+2. If timeout is exceeded, saves the partially compressed version to the main processed-photos/ directory
+3. Copies the original uncompressed image to problem-photos/
 4. Marks the image with `exceeded_timeout=True` in results.csv
 
 This ensures you always have usable images in your processed library while preserving the originals as backups.
-
-## Performance Notes
-
-- EXIF processing happens once per image, before the compression loop (not repeatedly)
-- Processing time varies significantly based on image format, resolution, and EXIF complexity
-- iPhone HEIC files may require more processing time due to auxiliary data structures
 
 MIT
